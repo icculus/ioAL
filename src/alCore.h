@@ -29,6 +29,10 @@
  *    rendered audio fed to it for playback), you should look at alMixer.h;
  *    this is the included software mixer that will render a PCM stream and
  *    feed it to another API or a basic DSP.
+ *  - If you want to add a capture device (gluing a recording API or hooking
+ *    up to real hardware), please study the __alCaptureInterface structure
+ *    in this file. You will be implementing the methods in that structure and
+ *    adding a structure full of pointers to your implementation to a table.
  *  - If you want to add an extension, you may need to touch several pieces
  *    of the AL. You will want to start with alPublic.c, which implements
  *    the application entry points.
@@ -57,6 +61,11 @@ typedef struct S_ALDEVIMPL
 {
     void *opaque;
 } __alDeviceImpl;
+
+typedef struct S_ALCAPIMPL
+{
+    void *opaque;
+} __alCaptureImpl;
 
 
 /*
@@ -137,7 +146,7 @@ typedef struct S_ALDEVINTERFACE
      *   with any sort of output format (see "configure" method).
      *
      * The implementation is to examine the device name and decide if this
-     *  is a device they own, and return zero immediately if not. The AL will
+     *  is a device they own, and return NULL immediately if not. The AL will
      *  iterate over all device interfaces until one claims the device name.
      *
      * Device interfaces should not be considered singleton in nature; if you
@@ -301,8 +310,105 @@ typedef struct S_ALDEVINTERFACE
     void (*upkeep)(__alDeviceImpl *dev);
 } __alDeviceInterface;
 
-extern __alDeviceInterface **__alDeviceInterfaces;
+/*
+ * You need to add your interface to this table in alCore.c ...
+ */
+extern const __alDeviceInterface *__alDeviceInterfaces[];
 
+
+typedef struct S_ALCAPINTERFACE
+{
+    /*
+     * Enumerate device names. This function is used by ALC_ENUMERATION_EXT.
+     *  Call the supplied callback with all reasonable device names you'll
+     *  accept. Since some devices aren't reasonable to enumerate, such as a
+     *  remote audio daemon, this is not used by alcCaptureOpenDevice(), so
+     *  you may still get requests to open device names that aren't in your
+     *  enumeration. In the same vein, if you can't enumerate every device,
+     *  or any, just report what's reasonable and return.
+     *
+     * This method may be called at any time, with or without an opened
+     *  device.
+     */
+    void (*enumerate)(void (*callback)(const ALubyte *name));
+
+    /*
+     * "Open" the device. This gives you a chance to allocate resources and
+     *  configure the hardware for the specified capture format.
+     *
+     * The implementation is to examine the device name and decide if this
+     *  is a device they own, and return NULL immediately if not. The AL will
+     *  iterate over all device interfaces until one claims the device name.
+     *
+     * The arguments specify the requested audio format. If you can provide
+     *  native conversion and resampling to the requested format, please
+     *  do, otherwise, the AL will provide the conversion. On return, set
+     *  these arguments to the actual format the implementation will provide.
+     *
+     * Device interfaces should not be considered singleton in nature; if you
+     *  can handle multiple openings of your device (or multiple devices at
+     *  the same time) you should. Failing to open more than once is not
+     *  unheard of, though, especially for capture devices.
+     *
+     * If you can claim this device name, allocate your instance data and
+     *  return a pointer to it and update the format variables. Otherwise,
+     *  return NULL.
+     */
+    __alCaptureImpl *(*open)(const ALubyte *devname, ALuint *freq,
+                                ALenum *fmt, ALsizei *samples);
+
+    /*
+     * Stop all capture, close the device and release any resources used by
+     *  it. The device should be prepared for future calls to the open()
+     *  method.
+     *
+     * The implementation isn't guaranteed to be stopped before this call;
+     *  please halt capture manually if needed.
+     *
+     * Unless otherwise noted, all members of this interface are only
+     *  valid between a successful open() and a matching close() call.
+     */
+    void (*close)(__alCaptureImpl *dev);
+
+    /*
+     * Start the capture device...this is meant to be an optimization for
+     *  times when the application definitely won't need captured audio
+     *  (such as during a game's level loading, etc). Capture devices
+     *  begin in the stopped state after being successfully opened and must
+     *  thereafter be explicitly started.
+     *
+     * This is a different action from opening the device. An opened device
+     *  may start and stop several times between open and close.
+     */
+    void (*start)(__alCaptureImpl *dev);
+
+    /*
+     * Halt the capture device...this is meant to be an optimization for
+     *  times when the application definitely won't need captured audio
+     *  (such as during a game's level loading, etc).
+     *
+     * This is a different action from closing the device. An opened device
+     *  may start and stop several times between open and close.
+     */
+    void (*stop)(__alCaptureImpl *dev);
+
+    /*
+     * Grab more data from the capture device. If there is data available,
+     *  write no more than (bufsize) bytes to (buf). (bufsize) is guaranteed
+     *  to be a multiple of the size of a sample frame in the format you
+     *  promised in the open() method return values. When you return
+     *  more data is up to you...if it's inefficient to move a half-full
+     *  buffer across the bus, you can return zero until you return a large
+     *  buffer.
+     *
+     * Returns the number of bytes retrieved from the capture device.
+     */
+    ALsizei (*pump)(__alCaptureImpl *dev, ALubyte *buf, ALsizei bufsize);
+} __alCaptureInterface;
+
+
+
+/* These are used by the AL core, and can be ignored by implementations. */
 
 /*
  * alcOpenDevice() returns an opaque pointer to an __alDevice; this is what
@@ -316,6 +422,14 @@ typedef struct S_ALDEV
     ALuint bufferCount;
     __alBuffer *buffers;  /* buffers are shared between ctxs on the device */
 } __alDevice;
+
+
+typedef struct S_ALCAP
+{
+    __alCaptureInterface *interface;
+    __alCaptureImpl *impl;
+    // !!! FIXME: ring buffer, format info, etc go here.
+} __alCapture;
 
 #endif
 
